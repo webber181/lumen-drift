@@ -1,7 +1,7 @@
 // Painting the things in the world: the ship, the drones, shots, star cores and particles.
 // Everything is vector shapes plus cached glow sprites; shadowBlur is used only on the ship
 // and the elite so a screen full of enemies stays fast.
-import { PALETTE } from './config.js';
+import { CORE, PALETTE } from './config.js';
 import { clamp01, drawGlow, polyPath, rgba, starPath, text } from './gfx.js';
 
 const TAU = Math.PI * 2;
@@ -140,71 +140,61 @@ export function drawReticle(ctx, p, t) {
   ctx.restore();
 }
 
-export function drawEnemy(ctx, e, t) {
-  const hpRatio = e.maxHp > 0 ? e.hp / e.maxHp : 1;
-  const flash = e.flash > 0;
-  const born = e.age === undefined ? 1 : clamp01(e.age / 0.5);
-  const grow = born < 1 ? 1 - Math.pow(1 - born, 3) * 0.9 : 1;
-  const r = e.radius * grow;
+/** Spawn-in animation: drones grow from a speck over this many seconds. */
+const BIRTH_SECONDS = 0.5;
 
-  ctx.globalCompositeOperation = 'lighter';
-  drawGlow(ctx, e.color, e.x, e.y, r * 2.8, (e.kind === 'elite' ? 0.55 : 0.42) * (flash ? 1.5 : 1) * (0.4 + 0.6 * born));
-  ctx.globalCompositeOperation = 'source-over';
-
-  ctx.save();
-  ctx.translate(e.x, e.y);
-  ctx.rotate(e.rot);
-  ctx.lineJoin = 'round';
-  if (e.kind === 'elite') {
-    ctx.shadowColor = e.color;
-    ctx.shadowBlur = 18;
+/** Stroke `count` spokes from a ring at `inner` x radius out to the rim. */
+function spokes(ctx, r, inner, count) {
+  ctx.beginPath();
+  for (let i = 0; i < count; i += 1) {
+    const a = (i / count) * TAU;
+    ctx.moveTo(Math.cos(a) * r * inner, Math.sin(a) * r * inner);
+    ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
   }
-
-  // Body: dark translucent fill with a bright rim.
-  polyPath(ctx, 0, 0, r, e.sides, 0);
-  const body = ctx.createRadialGradient(0, 0, r * 0.1, 0, 0, r);
-  body.addColorStop(0, rgba(e.color, flash ? 0.95 : 0.1 + 0.25 * hpRatio));
-  body.addColorStop(1, rgba(e.color, flash ? 0.95 : 0.34));
-  ctx.fillStyle = flash ? '#ffffff' : body;
-  ctx.fill();
-  ctx.strokeStyle = flash ? '#ffffff' : e.color;
-  ctx.lineWidth = e.kind === 'elite' ? 3.4 : 2.4;
   ctx.stroke();
-  ctx.shadowBlur = 0;
+}
 
-  // Inner shapes, distinct per kind.
-  ctx.strokeStyle = rgba(PALETTE.white, flash ? 0.9 : 0.5);
-  ctx.lineWidth = 1.2;
-  if (e.kind === 'triangle') {
+/** Path of a {points/2} star polygon (a pentagram for five points). */
+function pentagramPath(ctx, r, points) {
+  ctx.beginPath();
+  for (let i = 0; i < points; i += 1) {
+    const a = ((i * 2) / points) * TAU;
+    if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  ctx.closePath();
+}
+
+/**
+ * The markings inside each kind's outline, drawn in the drone's rotated frame with a pale
+ * stroke already set. Each kind reads differently at a glance.
+ */
+const MARKINGS = {
+  triangle(ctx, e, r) {
     polyPath(ctx, -r * 0.1, 0, r * 0.5, 3, 0);
     ctx.stroke();
-  } else if (e.kind === 'square') {
+  },
+  square(ctx, e, r) {
     ctx.save();
     ctx.rotate(-e.rot * 2.4);
     polyPath(ctx, 0, 0, r * 0.62, 4, Math.PI / 4);
     ctx.stroke();
     ctx.restore();
     ctx.strokeStyle = rgba(e.color, 0.7);
+    ctx.beginPath();
     for (let i = 0; i < 4; i += 1) {
       const a = (i / 4) * TAU;
-      ctx.beginPath();
       ctx.moveTo(Math.cos(a) * r * 0.62, Math.sin(a) * r * 0.62);
       ctx.lineTo(Math.cos(a + Math.PI / 4) * r, Math.sin(a + Math.PI / 4) * r);
-      ctx.stroke();
     }
-  } else if (e.kind === 'pentagon') {
-    ctx.beginPath();
-    for (let i = 0; i < 5; i += 1) {
-      const a = ((i * 2) / 5) * TAU;
-      const px = Math.cos(a) * r * 0.72;
-      const py = Math.sin(a) * r * 0.72;
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.closePath();
     ctx.stroke();
-  } else {
-    // Elite: nested polygon, counter-rotating ring, health-coloured core.
+  },
+  pentagon(ctx, e, r) {
+    pentagramPath(ctx, r * 0.72, 5);
+    ctx.stroke();
+  },
+  elite(ctx, e, r, t) {
+    // Nested polygon, a counter-rotating dashed ring and spokes out to the rim.
     polyPath(ctx, 0, 0, r * 0.7, e.sides, Math.PI / e.sides);
     ctx.stroke();
     ctx.save();
@@ -214,24 +204,60 @@ export function drawEnemy(ctx, e, t) {
     ctx.beginPath();
     ctx.arc(0, 0, r * 0.5, 0, TAU);
     ctx.stroke();
-    ctx.setLineDash([]);
     ctx.restore();
-    for (let i = 0; i < e.sides; i += 1) {
-      const a = (i / e.sides) * TAU;
-      ctx.beginPath();
-      ctx.moveTo(Math.cos(a) * r * 0.7, Math.sin(a) * r * 0.7);
-      ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
-      ctx.stroke();
-    }
+    ctx.setLineDash([]);
+    spokes(ctx, r, 0.7, e.sides);
+  },
+};
+
+/** Dark translucent body with a bright rim (white when the drone was just hit). */
+function paintBody(ctx, e, r, flash, hpRatio) {
+  polyPath(ctx, 0, 0, r, e.sides, 0);
+  const body = ctx.createRadialGradient(0, 0, r * 0.1, 0, 0, r);
+  body.addColorStop(0, rgba(e.color, flash ? 0.95 : 0.1 + 0.25 * hpRatio));
+  body.addColorStop(1, rgba(e.color, flash ? 0.95 : 0.34));
+  ctx.fillStyle = flash ? '#ffffff' : body;
+  ctx.fill();
+  ctx.strokeStyle = flash ? '#ffffff' : e.color;
+  ctx.lineWidth = e.kind === 'elite' ? 3.4 : 2.4;
+  ctx.stroke();
+}
+
+export function drawEnemy(ctx, e, t) {
+  const elite = e.kind === 'elite';
+  const hpRatio = e.maxHp > 0 ? e.hp / e.maxHp : 1;
+  const flash = e.flash > 0;
+  // Staged and title drones have no age: they are fully grown.
+  const born = e.age === undefined ? 1 : clamp01(e.age / BIRTH_SECONDS);
+  const r = e.radius * (born < 1 ? 1 - (1 - born) ** 3 * 0.9 : 1);
+
+  ctx.globalCompositeOperation = 'lighter';
+  const haze = (elite ? 0.55 : 0.42) * (flash ? 1.5 : 1) * (0.4 + 0.6 * born);
+  drawGlow(ctx, e.color, e.x, e.y, r * 2.8, haze);
+  ctx.globalCompositeOperation = 'source-over';
+
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.rotate(e.rot);
+  ctx.lineJoin = 'round';
+  if (elite) {
+    ctx.shadowColor = e.color;
+    ctx.shadowBlur = 18;
   }
+  paintBody(ctx, e, r, flash, hpRatio);
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = rgba(PALETTE.white, flash ? 0.9 : 0.5);
+  ctx.lineWidth = 1.2;
+  (MARKINGS[e.kind] ?? MARKINGS.elite)(ctx, e, r, t);
   ctx.restore();
 
   // Bright core.
   ctx.globalCompositeOperation = 'lighter';
-  drawGlow(ctx, flash ? '#ffffff' : PALETTE.white, e.x, e.y, r * (e.kind === 'elite' ? 0.7 : 0.55), 0.6 + 0.25 * Math.sin(t * 6 + (e.phase || 0)));
+  const pulse = 0.6 + 0.25 * Math.sin(t * 6 + (e.phase || 0));
+  drawGlow(ctx, flash ? '#ffffff' : PALETTE.white, e.x, e.y, r * (elite ? 0.7 : 0.55), pulse);
   ctx.globalCompositeOperation = 'source-over';
 
-  if (e.kind === 'elite') drawEliteExtras(ctx, e, t, hpRatio);
+  if (elite) drawEliteExtras(ctx, e, t, hpRatio);
 }
 
 function drawEliteExtras(ctx, e, t, hpRatio) {
@@ -309,8 +335,9 @@ export function drawEnemyBullets(ctx, list, t) {
 
 export function drawCores(ctx, list, t) {
   for (const c of list) {
-    const remaining = 10 - c.age;
-    if (remaining < 2.2 && Math.floor(t * 10) % 2 === 0) continue;
+    // Cores blink for their last seconds before they vanish.
+    const remaining = CORE.life - c.age;
+    if (remaining < CORE.blink && Math.floor(t * 10) % 2 === 0) continue;
     const pulse = 0.8 + 0.2 * Math.sin(t * 6 + c.phase);
     ctx.globalCompositeOperation = 'lighter';
     drawGlow(ctx, PALETTE.amber, c.x, c.y, 24 * pulse, 0.85);

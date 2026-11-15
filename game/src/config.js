@@ -63,6 +63,35 @@ export const CORE = {
   blink: 2.2,
 };
 
+/** Wave pacing: how long each phase lasts and how a wave is paid out. */
+export const WAVE = {
+  introSeconds: 1.9,
+  eliteIntroSeconds: 2.8,
+  clearSeconds: 2.6,
+  bonusPerWave: 300,
+  /** An elite wave holds this share of a normal wave's drones, plus the elite itself. */
+  eliteEscortShare: 0.6,
+};
+
+/** Where and how often drones arrive. */
+export const SPAWN = {
+  edgeMargin: 40,
+  minDistance: 320,
+  eliteMinDistance: 380,
+  eliteDelay: 2,
+  jitter: [0.7, 1.3],
+  retries: 5,
+};
+
+/** Click-drag steering: no pull inside the dead zone, full pull at `fullPull` pixels. */
+export const DRAG_STEER = { deadZone: 34, fullPull: 170 };
+
+/** Hostile shots fired by squares (from `fromWave`) and elites. */
+export const HOSTILE_SHOT = {
+  square: { speed: 190, radius: 5, fromWave: 6, firstDelay: [2.5, 4.5], baseInterval: 4.6, perWave: 0.12, minInterval: 2.2 },
+  elite: { radius: 6, spread: 0.27 },
+};
+
 export const SLOWMO = { scale: 0.32, nearMiss: 0.55, hit: 0.22, cooldown: 5 };
 
 /** Per-kind enemy stats. `speed` is pixels per second before the wave's speed multiplier. */
@@ -87,8 +116,23 @@ export const ELITE = {
   ],
 };
 
+/** Elite hit points: tougher every elite wave (wave 5: 80, wave 10: 110). */
 export function eliteHealth(wave) {
   return 50 + wave * 6;
+}
+
+/** Share of a wave's drones that are squares (from wave 2) and pentagons (from wave 3). */
+export function squareShare(wave) {
+  return wave >= 2 ? Math.min(0.38, 0.1 + 0.035 * wave) : 0;
+}
+
+export function pentagonShare(wave) {
+  return wave >= 3 ? Math.min(0.38, 0.08 + 0.045 * (wave - 2)) : 0;
+}
+
+/** Points for clearing a wave. */
+export function waveBonus(wave) {
+  return WAVE.bonusPerWave * wave;
 }
 
 export function isEliteWave(wave) {

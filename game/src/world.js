@@ -3,10 +3,11 @@
 // and collects cores, and builds combo and shield. Things that should make a sound are pushed
 // onto state.events for main.js to hand to the audio; nothing here touches the screen.
 import {
-  COMBO, CORE, ELITE, ENEMY, H, PALETTE, PLAYER, SLOWMO, W, WEAPON,
-  activeCap, comboMultiplier, eliteHealth, isEliteWave, spawnInterval, speedMultiplier, waveCount, weaponLevel,
+  COMBO, CORE, DRAG_STEER, ELITE, ENEMY, H, HOSTILE_SHOT, PALETTE, PLAYER, SLOWMO, SPAWN, W, WAVE, WEAPON,
+  activeCap, comboMultiplier, eliteHealth, isEliteWave, pentagonShare, spawnInterval, speedMultiplier, squareShare,
+  waveBonus, waveCount, weaponLevel,
 } from './config.js';
-import { createRandom, pick, range, sign } from './random.js';
+import { createRandom, range, sign } from './random.js';
 import * as fx from './particles.js';
 
 const TAU = Math.PI * 2;
@@ -84,14 +85,15 @@ export function createWorld(seed) {
   function buildQueue(wave) {
     const queue = [];
     const count = waveCount(wave);
-    const squareShare = wave >= 2 ? Math.min(0.38, 0.1 + 0.035 * wave) : 0;
-    const pentagonShare = wave >= 3 ? Math.min(0.38, 0.08 + 0.045 * (wave - 2)) : 0;
+    const pentagons = pentagonShare(wave);
+    const squares = pentagons + squareShare(wave);
     for (let i = 0; i < count; i += 1) {
-      const r = rng();
-      queue.push(r < pentagonShare ? 'pentagon' : r < pentagonShare + squareShare ? 'square' : 'triangle');
+      const roll = rng();
+      queue.push(roll < pentagons ? 'pentagon' : roll < squares ? 'square' : 'triangle');
     }
     if (isEliteWave(wave)) {
-      queue.length = Math.floor(count * 0.6);
+      // The elite leads a smaller escort.
+      queue.length = Math.floor(count * WAVE.eliteEscortShare);
       queue.unshift('elite');
     }
     return queue;
@@ -104,7 +106,7 @@ export function createWorld(seed) {
     state.waveKilled = 0;
     state.phase = 'intro';
     const elite = isEliteWave(wave);
-    state.phaseTimer = elite ? 2.8 : 1.9;
+    state.phaseTimer = elite ? WAVE.eliteIntroSeconds : WAVE.introSeconds;
     state.spawnTimer = 0;
     state.banner = elite
       ? { text: `WAVE ${wave}`, sub: 'ELITE DRONE INCOMING', t: 0, dur: 2.6, color: PALETTE.magenta }
@@ -114,17 +116,23 @@ export function createWorld(seed) {
 
   function spawnPoint(minDistance) {
     const p = state.player;
-    let x = 0;
-    let y = 0;
-    for (let tries = 0; tries < 5; tries += 1) {
-      const edge = Math.floor(rng() * 4);
-      if (edge === 0) { x = range(rng, 0, W); y = -40; }
-      else if (edge === 1) { x = W + 40; y = range(rng, 0, H); }
-      else if (edge === 2) { x = range(rng, 0, W); y = H + 40; }
-      else { x = -40; y = range(rng, 0, H); }
-      if (Math.hypot(x - p.x, y - p.y) >= minDistance) break;
+    const m = SPAWN.edgeMargin;
+    // One point just outside a random edge: top, right, bottom or left.
+    const onEdge = (edge) => {
+      const along = range(rng, 0, edge % 2 === 0 ? W : H);
+      return [
+        { x: along, y: -m },
+        { x: W + m, y: along },
+        { x: along, y: H + m },
+        { x: -m, y: along },
+      ][edge];
+    };
+    let point = onEdge(Math.floor(rng() * 4));
+    // Retry a few times so a drone never appears right on top of the ship.
+    for (let tries = 1; tries < SPAWN.retries && Math.hypot(point.x - p.x, point.y - p.y) < minDistance; tries += 1) {
+      point = onEdge(Math.floor(rng() * 4));
     }
-    return { x, y };
+    return point;
   }
 
   function makeEnemy(kind, x, y) {
@@ -159,7 +167,7 @@ export function createWorld(seed) {
       age: 0,
       phase: rng() * TAU,
       orbit: sign(rng),
-      fireTimer: elite ? 2 : kind === 'square' ? 2.5 + rng() * 2 : 0,
+      fireTimer: elite ? 2 : kind === 'square' ? range(rng, ...HOSTILE_SHOT.square.firstDelay) : 0,
       summons: 0,
       nearState: 0,
       dead: false,
@@ -177,6 +185,31 @@ export function createWorld(seed) {
     return e;
   }
 
+  /** Pay out the wave bonus, announce it and set off the celebration around the ship. */
+  function clearWave() {
+    const s = state;
+    const bonus = waveBonus(s.wave);
+    s.score += bonus;
+    s.phase = 'clear';
+    s.phaseTimer = WAVE.clearSeconds;
+    s.banner = { text: `WAVE ${s.wave} CLEAR`, sub: `BONUS +${bonus.toLocaleString('en-US')}`, t: 0, dur: 2.4, color: PALETTE.amber };
+    emit('waveClear', s.wave);
+    const { x, y } = s.player;
+    fx.ring(s, x, y, PALETTE.amber, 420, 1.0);
+    fx.ring(s, x, y, PALETTE.cyan, 300, 0.8);
+    fx.glow(s, x, y, PALETTE.amber, 160, 0.5, 0.6, 1.2);
+    const confetti = [PALETTE.amber, PALETTE.cyan, PALETTE.magenta, '#ffffff'];
+    for (let i = 0; i < 46; i += 1) fx.spark(s, rng, x, y, confetti[i % confetti.length], 520, 1.1, 2.2);
+  }
+
+  /** Launch one hostile shot from an enemy along `angle`. */
+  function fireHostile(e, angle, speed, radius) {
+    state.enemyBullets.push({
+      x: e.x + Math.cos(angle) * e.radius, y: e.y + Math.sin(angle) * e.radius,
+      vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, life: 6, radius, color: e.color, nearState: 0,
+    });
+  }
+
   function updateWave(dt) {
     const s = state;
     s.banner.t += dt;
@@ -187,24 +220,12 @@ export function createWorld(seed) {
       s.spawnTimer -= dt;
       if (s.queue.length > 0 && s.spawnTimer <= 0 && s.enemies.length < activeCap(s.wave)) {
         const kind = s.queue.shift();
-        const pt = spawnPoint(kind === 'elite' ? 380 : 320);
+        const pt = spawnPoint(kind === 'elite' ? SPAWN.eliteMinDistance : SPAWN.minDistance);
         spawnEnemy(kind, pt.x, pt.y);
-        s.spawnTimer = spawnInterval(s.wave) * range(rng, 0.7, 1.3);
-        if (kind === 'elite') s.spawnTimer += 2;
+        s.spawnTimer = spawnInterval(s.wave) * range(rng, SPAWN.jitter[0], SPAWN.jitter[1]);
+        if (kind === 'elite') s.spawnTimer += SPAWN.eliteDelay;
       }
-      if (s.queue.length === 0 && s.enemies.length === 0 && s.alive) {
-        const bonus = 300 * s.wave;
-        s.score += bonus;
-        s.phase = 'clear';
-        s.phaseTimer = 2.6;
-        s.banner = { text: `WAVE ${s.wave} CLEAR`, sub: `BONUS +${bonus.toLocaleString('en-US')}`, t: 0, dur: 2.4, color: PALETTE.amber };
-        emit('waveClear', s.wave);
-        const p = s.player;
-        fx.ring(s, p.x, p.y, PALETTE.amber, 420, 1.0);
-        fx.ring(s, p.x, p.y, PALETTE.cyan, 300, 0.8);
-        fx.glow(s, p.x, p.y, PALETTE.amber, 160, 0.5, 0.6, 1.2);
-        for (let i = 0; i < 46; i += 1) fx.spark(s, rng, p.x, p.y, [PALETTE.amber, PALETTE.cyan, PALETTE.magenta, '#ffffff'][i % 4], 520, 1.1, 2.2);
-      }
+      if (s.queue.length === 0 && s.enemies.length === 0 && s.alive) clearWave();
     } else if (s.phase === 'clear') {
       s.phaseTimer -= dt;
       if (s.phaseTimer <= 0) prepareWave(s.wave + 1);
@@ -245,8 +266,8 @@ export function createWorld(seed) {
       const dx = input.aimX - p.x;
       const dy = input.aimY - p.y;
       const d = Math.hypot(dx, dy);
-      if (d > 34) {
-        const k = Math.min(1, (d - 34) / 170);
+      if (d > DRAG_STEER.deadZone) {
+        const k = Math.min(1, (d - DRAG_STEER.deadZone) / DRAG_STEER.fullPull);
         mx = (dx / d) * k;
         my = (dy / d) * k;
       }
@@ -285,9 +306,12 @@ export function createWorld(seed) {
     // Exhaust trail.
     if (p.thrust > 0.25 && rng() < 0.55 + p.thrust * 0.4) {
       const back = p.angle + Math.PI;
-      const tx = p.x + Math.cos(back) * 11;
-      const ty = p.y + Math.sin(back) * 11;
-      fx.glow(state, tx, ty, rng() < 0.5 ? PALETTE.cyan : PALETTE.violet, 8 + p.thrust * 5, 0.3, 0.55, -0.5, p.vx * -0.1 + Math.cos(back) * 40, p.vy * -0.1 + Math.sin(back) * 40);
+      const color = rng() < 0.5 ? PALETTE.cyan : PALETTE.violet;
+      // The puff leaves the nozzle and drifts back, carrying a little of the ship's motion.
+      fx.glow(
+        state, p.x + Math.cos(back) * 11, p.y + Math.sin(back) * 11, color, 8 + p.thrust * 5, 0.3, 0.55, -0.5,
+        Math.cos(back) * 40 - p.vx * 0.1, Math.sin(back) * 40 - p.vy * 0.1,
+      );
     }
   }
 
@@ -385,12 +409,10 @@ export function createWorld(seed) {
     const p = state.player;
     const base = Math.atan2(p.y - e.y, p.x - e.x);
     const n = e.hp < e.maxHp * 0.5 ? 5 : 3;
+    // A fan of shots centred on the ship; the fan widens when the elite is badly hurt.
     for (let i = 0; i < n; i += 1) {
-      const a = base + (i - (n - 1) / 2) * 0.27;
-      state.enemyBullets.push({
-        x: e.x + Math.cos(a) * e.radius, y: e.y + Math.sin(a) * e.radius,
-        vx: Math.cos(a) * ELITE.bulletSpeed, vy: Math.sin(a) * ELITE.bulletSpeed, life: 6, radius: 6, color: e.color, nearState: 0,
-      });
+      const angle = base + (i - (n - 1) / 2) * HOSTILE_SHOT.elite.spread;
+      fireHostile(e, angle, ELITE.bulletSpeed, HOSTILE_SHOT.elite.radius);
     }
     fx.glow(state, e.x, e.y, e.color, e.radius * 1.6, 0.25, 0.8, 0.5);
     emit('enemyShot');
@@ -455,15 +477,12 @@ export function createWorld(seed) {
         if (e.summons === 0 && ratio < 0.66) { e.summons = 1; summonDarts(e, 3); emit('elite'); }
         if (e.summons === 1 && ratio < 0.33) { e.summons = 2; summonDarts(e, 4); emit('elite'); }
       }
-      if (e.kind === 'square' && s.alive && s.wave >= 6 && e.age > 1) {
+      const gun = HOSTILE_SHOT.square;
+      if (e.kind === 'square' && s.alive && s.wave >= gun.fromWave && e.age > 1) {
         e.fireTimer -= dt;
         if (e.fireTimer <= 0) {
-          e.fireTimer = Math.max(2.2, 4.6 - s.wave * 0.12) * range(rng, 0.8, 1.2);
-          const a = Math.atan2(dy, dx);
-          s.enemyBullets.push({
-            x: e.x + Math.cos(a) * e.radius, y: e.y + Math.sin(a) * e.radius,
-            vx: Math.cos(a) * 190, vy: Math.sin(a) * 190, life: 6, radius: 5, color: e.color, nearState: 0,
-          });
+          e.fireTimer = Math.max(gun.minInterval, gun.baseInterval - s.wave * gun.perWave) * range(rng, 0.8, 1.2);
+          fireHostile(e, Math.atan2(dy, dx), gun.speed, gun.radius);
           fx.glow(s, e.x, e.y, e.color, e.radius * 1.5, 0.2, 0.7, 0.4);
           emit('enemyShot');
         }
@@ -672,7 +691,6 @@ export function createWorld(seed) {
     /** Used by the screenshot scenes to place things by hand. */
     stage: { spawnEnemy, prepareWave, rng: () => rng, emit },
     fx,
-    pick: (list) => pick(rng, list),
   };
   prepareWave(1);
   state.events.length = 0;
