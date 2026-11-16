@@ -1,9 +1,5 @@
-// Boot and the one loop. Input is read each step, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one) and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes every random choice. ?shot=start|play|end (with &seed=N) stages one fixed scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
+// Fixed-timestep 60 Hz loop between title, play, paused and game over screens.
+// ?seed=N fixes RNG; ?shot=start|play|end stages a fixed frame and sets window.__shotReady.
 import { DEFAULT_SEED, STEP } from './config.js';
 import { createWorld } from './world.js';
 import {
@@ -13,11 +9,9 @@ import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE }
 import { createAudio } from './audio.js';
 import { stageShot } from './shots.js';
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
 const MAX_FRAME = 0.25;
-/** Seconds after the ship is lost before the game over card appears, and before it accepts restart. */
-const OVER_DELAY = 0.9;
-const OVER_LOCK = 1.5;
+const OVER_DELAY = 1.05;
+const OVER_LOCK = 1.65;
 
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
@@ -49,14 +43,18 @@ function runGame() {
   let accumulator = 0;
   let last = performance.now();
 
-  function announce(message) {
-    status.textContent = message;
-  }
+  const announce = (msg) => { if (status) status.textContent = msg; };
 
   function setScreen(screen) {
     view.screen = screen;
     canvas.style.cursor = screen === SCREEN_PLAY ? 'none' : 'default';
     audio.setPaused(screen === SCREEN_PAUSED);
+  }
+
+  function pauseGame() {
+    if (view.screen !== SCREEN_PLAY) return;
+    setScreen(SCREEN_PAUSED);
+    announce('Paused. Press P or click to resume.');
   }
 
   function startGame() {
@@ -66,19 +64,19 @@ function runGame() {
     view.overTime = 0;
     input.releaseAll();
     input.takeActions();
+    setScreen(SCREEN_PLAY);
     audio.cue('start');
     audio.resumeHum();
-    setScreen(SCREEN_PLAY);
-    announce('Playing. Wave 1. 3 hull.');
+    announce(`Playing. Wave ${world.state.wave}. ${world.state.hull} hull.`);
   }
 
   function endGame() {
-    const state = world.state;
-    state.newBest = state.score > view.best;
-    if (state.newBest) view.best = state.score;
+    const s = world.state;
+    s.newBest = s.score > view.best;
+    if (s.newBest) view.best = s.score;
     view.overTime = -OVER_DELAY;
     setScreen(SCREEN_OVER);
-    announce(`Game over. Score ${state.score}. Best ${view.best}. Press R or click to restart.`);
+    announce(`Game over. Score ${s.score}. Best ${view.best}. Press R or click to restart.`);
   }
 
   function handleActions() {
@@ -87,6 +85,7 @@ function runGame() {
     if (actions & ACTION_MUTE) {
       audio.setMuted(!audio.isMuted());
       view.muted = audio.isMuted();
+      announce(view.muted ? 'Audio muted.' : 'Audio unmuted.');
     }
     if (actions & ACTION_AUTO && view.screen !== SCREEN_TITLE) {
       world.state.autoFire = !world.state.autoFire;
@@ -96,39 +95,36 @@ function runGame() {
     if (view.screen === SCREEN_TITLE) {
       if (start) startGame();
     } else if (view.screen === SCREEN_PLAY) {
-      if (actions & ACTION_PAUSE) {
-        setScreen(SCREEN_PAUSED);
-        announce('Paused.');
-      } else if (actions & ACTION_RESTART) startGame();
+      if (actions & ACTION_PAUSE) pauseGame();
+      else if (actions & ACTION_RESTART) startGame();
     } else if (view.screen === SCREEN_PAUSED) {
       if (actions & ACTION_RESTART) startGame();
       else if (actions & (ACTION_PAUSE | ACTION_CONFIRM | ACTION_CLICK)) {
         setScreen(SCREEN_PLAY);
         input.releaseAll();
-        announce('Playing.');
+        announce(`Playing. Wave ${world.state.wave}.`);
       }
-    } else if (view.screen === SCREEN_OVER) {
-      if (start && view.overTime > OVER_LOCK - OVER_DELAY) startGame();
+    } else if (view.screen === SCREEN_OVER && start && view.overTime > OVER_LOCK - OVER_DELAY) {
+      startGame();
     }
   }
 
-  function pauseIfPlaying() {
-    if (view.screen === SCREEN_PLAY) {
-      setScreen(SCREEN_PAUSED);
-      announce('Paused.');
-    }
-  }
-  window.addEventListener('blur', pauseIfPlaying);
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) pauseIfPlaying();
-  });
+  window.addEventListener('blur', pauseGame);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) pauseGame(); });
 
   function step() {
     const events = world.state.events;
     world.step(STEP, input.read());
-    for (const event of events) {
-      audio.play(event);
-      if (event.type === 'gameOver' && view.screen === SCREEN_PLAY) endGame();
+    for (const { type, value } of events) {
+      audio.play({ type, value });
+      if (type === 'gameOver' && view.screen === SCREEN_PLAY) endGame();
+      else if (view.screen === SCREEN_PLAY) {
+        const s = world.state;
+        if (type === 'waveClear') announce(`Wave ${value || s.wave} cleared. Score ${s.score}.`);
+        else if (type === 'waveStart' && value > 1) announce(`Wave ${value}.`);
+        else if (type === 'eliteWarn' || (type === 'elite' && value > 0)) announce(`Elite incoming on wave ${value}.`);
+        else if (type === 'powerup') announce(`Power-up: ${value}.`);
+      }
     }
     events.length = 0;
   }
@@ -146,6 +142,7 @@ function runGame() {
       }
     }
     if (view.screen === SCREEN_OVER) view.overTime += dt;
+    audio.tick(dt, view.screen === SCREEN_PLAY, world.state.hull === 1 ? 1 : 0);
     renderer.draw(world.state, view);
     requestAnimationFrame(frame);
   }
